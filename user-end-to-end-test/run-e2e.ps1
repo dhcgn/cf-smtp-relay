@@ -128,13 +128,17 @@ try {
     $subject = "cf-smtp-relay e2e $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
     $body = "End-to-end test via Send-MailMessage and Docker relay container '$containerName'."
 
+    $tempAttachment = Join-Path ([System.IO.Path]::GetTempPath()) "cf-smtp-relay-e2e-attachment.txt"
+    Set-Content -Path $tempAttachment -Value "cf-smtp-relay e2e attachment payload $(Get-Date -Format o)" -NoNewline
+
     $sendArgs = @{
-        SmtpServer = $smtpHost
-        Port       = $smtpPort
-        From       = $from
-        To         = $to
-        Subject    = $subject
-        Body       = $body
+        SmtpServer  = $smtpHost
+        Port        = $smtpPort
+        From        = $from
+        To          = $to
+        Subject     = $subject
+        Body        = $body
+        Attachments = $tempAttachment
     }
 
     $hasUser = $envMap.ContainsKey('SMTP_USER') -and -not [string]::IsNullOrWhiteSpace($envMap['SMTP_USER'])
@@ -144,7 +148,7 @@ try {
         $sendArgs['Credential'] = New-Object System.Management.Automation.PSCredential($envMap['SMTP_USER'], $securePass)
     }
 
-    Write-Host "Sending test email to '$to' via Send-MailMessage ..."
+    Write-Host "Sending test email (with attachment) to '$to' via Send-MailMessage ..."
     Send-MailMessage @sendArgs
 
     Write-Host ""
@@ -153,6 +157,10 @@ try {
     docker logs --tail 50 $containerName | Out-Host
 }
 finally {
+    if ($tempAttachment -and (Test-Path $tempAttachment)) {
+        Remove-Item -Path $tempAttachment -ErrorAction SilentlyContinue
+    }
+
     if (-not $KeepContainer) {
         Write-Host "Stopping and removing test container '$containerName' ..."
         docker rm -f $containerName | Out-Host

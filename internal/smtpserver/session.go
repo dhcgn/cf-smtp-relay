@@ -63,12 +63,22 @@ func (s *session) Data(r io.Reader) error {
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 6, 0}, Message: "malformed message"}
 	}
 
+	attachments := make([]cfclient.Attachment, 0, len(parsed.Attachments))
+	for _, a := range parsed.Attachments {
+		attachments = append(attachments, cfclient.Attachment{
+			Filename:    a.Filename,
+			ContentType: a.ContentType,
+			Content:     a.Content,
+		})
+	}
+
 	req := cfclient.SendEmailRequest{
-		From:    s.from,
-		To:      s.to,
-		Subject: parsed.Subject,
-		Text:    parsed.Text,
-		HTML:    parsed.HTML,
+		From:        s.from,
+		To:          s.to,
+		Subject:     parsed.Subject,
+		Text:        parsed.Text,
+		HTML:        parsed.HTML,
+		Attachments: attachments,
 	}
 
 	if _, err := s.backend.sender.SendEmail(context.Background(), req); err != nil {

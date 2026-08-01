@@ -55,6 +55,7 @@ Dependencies on Linux:
 - `curl`
 - `himalaya`
 - `jq`
+- `base64` and `sed` (used to build the test attachment; standard on virtually any Linux system)
 
 Run:
 
@@ -84,7 +85,7 @@ Common flow:
 2. Build Docker image `cf-smtp-relay:e2e` (unless skipped).
 3. Start container `cf-smtp-relay-e2e` with `--env-file .env` and map host SMTP port to container `2525`.
 4. Wait for SMTP listener readiness.
-5. Send a message through the local relay.
+5. Send a message with a small test attachment through the local relay.
 6. Print recent container logs.
 7. Stop/remove the container unless keep-container is requested.
 
@@ -93,6 +94,7 @@ Linux Bash script additionally:
 1. Creates a temporary Himalaya account config from the env vars.
 2. Polls IMAP with `himalaya --json envelope list`.
 3. Verifies that the sent test subject appears in the mailbox.
+4. Downloads the delivered message's attachment with `himalaya attachment download` and byte-compares it against the file that was sent, proving the attachment survived the full relay → Cloudflare → IMAP round trip.
 
 By default, that Himalaya config is created as a temporary file and deleted during cleanup.
 No persistent `.himalaya-e2e.toml` file is required.
@@ -101,9 +103,10 @@ Options:
 
 - Use temporary generated config (default): provide `IMAP_*` env vars in `.env`.
 - Use your existing Himalaya config: set `E2E_HIMALAYA_CONFIG_PATH` in `.env` to an existing config file path.
-- Skip mailbox verification completely: run `./run-e2e.sh --skip-himalaya-check`.
+- Skip mailbox and attachment verification completely: run `./run-e2e.sh --skip-himalaya-check`.
 
 ## Notes
 
 - `Send-MailMessage` is deprecated by Microsoft but intentionally used here, as requested.
 - The relay MVP does not support SMTP auth. `SMTP_USER` and `SMTP_PASS` can stay empty.
+- The Windows script attaches a small generated text file too, but only proves the relay returned SMTP `250` (which only happens after Cloudflare accepts the message) — it has no IMAP-based verification of the delivered attachment like the Linux script does.
