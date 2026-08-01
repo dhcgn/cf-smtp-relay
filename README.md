@@ -1,6 +1,6 @@
 A tiny, self-hosted **SMTP-to-Cloudflare-Email-API bridge**, written in Go and shipped as a Docker image. Point your self-hosted apps (Immich, Vaultwarden, Gitea, Nextcloud, …) at it like any normal SMTP relay — under the hood it forwards every message to [Cloudflare Email Service](https://developers.cloudflare.com/email-service/) over HTTPS instead of talking to a real mail relay.
 
-> ⚠️ Status: **concept / pre-MVP**. This README describes the target design; nothing has been implemented yet. See [Key decisions log](#key-decisions-log) for the scope-defining choices already made.
+> ✅ Status: **MVP implemented (v0.1.0)**. The SMTP relay, Cloudflare API forwarding, config validation, logging, tests, container image build, and release automation are implemented. See [Roadmap / Milestones](#roadmap--milestones) for what is next.
 
 ## Why this exists
 
@@ -35,7 +35,7 @@ Everything else — message parsing, the Cloudflare HTTP call, logging — stays
 
 ## Features
 
-**MVP (Milestone 1)**
+**Implemented (MVP / Milestone 1)**
 - Minimal SMTP server: `EHLO`, `MAIL FROM`, `RCPT TO`, `DATA`, `QUIT`
 - **No authentication** — the relay trusts whatever can reach it on the Docker network by design (see [Design decisions](#design-decisions))
 - Single recipient, plain-text + HTML body, `Subject`
@@ -48,7 +48,7 @@ Everything else — message parsing, the Cloudflare HTTP call, logging — stays
 - Graceful shutdown on `SIGTERM`/`SIGINT`
 - Multi-stage Dockerfile → distroless, non-root, published to `ghcr.io`
 
-**Planned (later milestones — see [Roadmap](#roadmap--milestones))**
+**Planned next (later milestones — see [Roadmap](#roadmap--milestones))**
 - Multiple recipients, `Cc`/`Bcc`, custom headers, attachments (≤ 5 MiB total, matching Cloudflare's limit)
 - Local retry queue with backoff for transient Cloudflare errors, if real-world usage shows the "let the client retry" approach isn't enough
 - `/healthz` endpoint + Prometheus metrics
@@ -103,6 +103,37 @@ Then point e.g. Immich at it: `SMTP_HOST=cf-smtp-relay`, `SMTP_PORT=2525`, no cr
 
 Quick start above intentionally shows only the minimum runtime env vars for the relay itself.
 It does not include extra variables used only by the user end-to-end test scripts.
+
+## Immich sample
+
+Example relay service for an Immich deployment:
+
+```yaml
+cf-smtp-relay:
+  image: ghcr.io/dhcgn/cf-smtp-relay:latest
+  container_name: cf_smtp_relay
+  restart: unless-stopped
+  environment:
+    CF_API_TOKEN: ${CF_API_TOKEN}
+    CF_ACCOUNT_ID: ${CF_ACCOUNT_ID}
+    SMTP_HOSTNAME: mail.internal
+    SMTP_LISTEN_ADDR: 0.0.0.0:25
+    LOG_LEVEL: info
+```
+
+In Immich Admin -> Settings -> Notifications -> Email, use:
+
+- Host: `cf_smtp_relay`
+- Port: `25`
+- Username: *(empty)*
+- Password: *(empty)*
+- STARTTLS/SMTPS: `off`
+- Ignore certificate errors: `off`
+- From address: one address using a domain/hostname you configured in Cloudflare Email Sending
+
+Immich settings screenshot:
+
+<img src="docs_assets/immich-screenshot.jpg" alt="Immich email settings" />
 
 ## User end-to-end test
 
@@ -165,7 +196,7 @@ There are deliberately no auth/TLS variables: the MVP has no built-in SMTP authe
 
 Cloudflare's REST API returns numeric error codes; the relay maps these to SMTP reply codes so sending applications retry (or give up) the way they normally would against a real MTA:
 
-| Cloudflare code | Meaning | SMTP mapping (planned) |
+| Cloudflare code | Meaning | SMTP mapping (implemented) |
 |---|---|---|
 | `10004` (429, throttled) | Rate limit exceeded | `450 4.7.1` — temporary, client should retry |
 | `10100` (503, upstream auth) | Auth service unavailable | `451 4.4.2` — temporary |
@@ -196,13 +227,13 @@ In the MVP, every one of these mapped codes is returned straight to the connecti
 ## Roadmap / Milestones
 
 - [x] **M0 — Scaffolding**: repo layout (`cmd/`, `internal/`), `LICENSE`, `.github/workflows/build-test.yml` + `.github/workflows/release.yml`, `.github/copilot-instructions.md`, Dockerfile skeleton, this README.
-- [ ] **M1 — MVP** 🎯: minimal, unauthenticated SMTP listener (trusted network only), single-recipient plain/HTML forwarding to Cloudflare, immediate `4xx`/`5xx` on transient/permanent Cloudflare errors (no retry queue), env-var-only config, structured logging, graceful shutdown, multi-stage Docker image published to `ghcr.io` on tag push.
+- [x] **M1 — MVP** 🎯: minimal, unauthenticated SMTP listener (trusted network only), single-recipient plain/HTML forwarding to Cloudflare, immediate `4xx`/`5xx` on transient/permanent Cloudflare errors (no retry queue), env-var-only config, structured logging, graceful shutdown, multi-stage Docker image published to `ghcr.io` on tag push.
 - [ ] **M2 — Message fidelity**: multiple recipients, `Cc`/`Bcc`, custom headers, attachments, size-limit enforcement with a clean SMTP rejection instead of a failed API call.
 - [ ] **M3 — Hardening**: `/healthz`, Prometheus metrics, and a decision (backed by real usage) on whether a local retry queue with backoff is worth adding for `429`/`5xx` Cloudflare responses.
 - [ ] **M4 — Distribution**: GoReleaser cross-platform binaries (linux/darwin/windows × amd64/arm64), SBOM + build provenance attestation for the Docker image, `docker-compose.yml` and example Kubernetes manifest in `/examples`.
 - [ ] **M5 — Stretch**: multiple Cloudflare accounts/domains with per-sender routing, delivery-status reconciliation (via Cloudflare's queued/delivered/bounce data), simple CLI for sending a test message without a full SMTP client, and — only if ever needed — STARTTLS/SMTP `AUTH` for running outside a trusted network.
 
-*(To be created as actual GitHub Milestones once the repo exists, with issues linked to each checkbox above.)*
+*(Track these checklist items in the repository as implementation progresses.)*
 
 ## Continuous integration & releases
 
@@ -252,7 +283,7 @@ GOOS=linux GOARCH=arm64 go build -o bin/cf-smtp-relay-linux-arm64 ./cmd/cf-smtp-
 
 ## License
 
-MIT (proposed).
+MIT.
 
 ## Key decisions log
 
