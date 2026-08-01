@@ -135,6 +135,39 @@ Immich settings screenshot:
 
 <img src="docs_assets/immich-screenshot.jpg" alt="Immich email settings" />
 
+## Paperless-ngx sample (minimal)
+
+Minimal Docker Compose example that only shows the SMTP-related parts for
+Paperless-ngx with this relay. It assumes your existing compose already defines
+the required `db` and `broker` services.
+
+```yaml
+services:
+  cf-smtp-relay:
+    image: ghcr.io/dhcgn/cf-smtp-relay:latest
+    environment:
+      CF_API_TOKEN: ${CF_API_TOKEN}
+      CF_ACCOUNT_ID: ${CF_ACCOUNT_ID}
+      SMTP_LISTEN_ADDR: 0.0.0.0:2525
+
+  webserver:
+    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    depends_on:
+      - db
+      - broker
+      - cf-smtp-relay
+    environment:
+      PAPERLESS_EMAIL_HOST: cf-smtp-relay
+      PAPERLESS_EMAIL_PORT: 2525
+      PAPERLESS_EMAIL_FROM: paperless@example.com
+```
+
+Paperless-ngx SMTP notes:
+
+- Set `PAPERLESS_EMAIL_HOST` to the relay service name (`cf-smtp-relay`)
+- Set `PAPERLESS_EMAIL_PORT` to the relay listener port (`2525` in this example)
+- Keep SMTP auth disabled (no username/password), matching the relay's MVP trust model
+
 ## User end-to-end test
 
 To quickly verify your setup from a real client flow, use the scripts in `user-end-to-end-test/`.
