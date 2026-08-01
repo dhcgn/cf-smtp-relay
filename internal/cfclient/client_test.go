@@ -2,6 +2,7 @@ package cfclient
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -153,6 +154,54 @@ func TestNew_DefaultBaseURL(t *testing.T) {
 	c := New(Config{APIToken: "t", AccountID: "a"})
 	if c.cfg.BaseURL != defaultBaseURL {
 		t.Errorf("BaseURL = %q, want default %q", c.cfg.BaseURL, defaultBaseURL)
+	}
+}
+
+func TestSendEmail_WithAttachments(t *testing.T) {
+	var gotBody sendEmailPayload
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(apiResponse{
+			Success: true,
+			Result:  &apiResult{Delivered: []string{"to@example.com"}},
+		})
+	}))
+	defer srv.Close()
+
+	c := New(Config{APIToken: "t", AccountID: "a", BaseURL: srv.URL})
+	_, err := c.SendEmail(context.Background(), SendEmailRequest{
+		From:    "from@example.com",
+		To:      "to@example.com",
+		Subject: "hello",
+		Text:    "plain body",
+		Attachments: []Attachment{
+			{Filename: "invoice.pdf", ContentType: "application/pdf", Content: []byte("hello")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SendEmail() error = %v", err)
+	}
+
+	if len(gotBody.Attachments) != 1 {
+		t.Fatalf("Attachments = %+v, want 1 entry", gotBody.Attachments)
+	}
+	got := gotBody.Attachments[0]
+	wantContent := base64.StdEncoding.EncodeToString([]byte("hello"))
+	if got.Content != wantContent {
+		t.Errorf("Content = %q, want %q", got.Content, wantContent)
+	}
+	if got.Filename != "invoice.pdf" {
+		t.Errorf("Filename = %q, want %q", got.Filename, "invoice.pdf")
+	}
+	if got.Type != "application/pdf" {
+		t.Errorf("Type = %q, want %q", got.Type, "application/pdf")
+	}
+	if got.Disposition != "attachment" {
+		t.Errorf("Disposition = %q, want %q", got.Disposition, "attachment")
 	}
 }
 

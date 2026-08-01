@@ -3,6 +3,7 @@ package cfclient
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -40,12 +41,23 @@ func New(cfg Config) *Client {
 
 // SendEmail forwards req to Cloudflare. Any non-nil error is a *SendError.
 func (c *Client) SendEmail(ctx context.Context, req SendEmailRequest) (*SendResult, error) {
+	var attachments []attachmentPayload
+	for _, a := range req.Attachments {
+		attachments = append(attachments, attachmentPayload{
+			Content:     base64.StdEncoding.EncodeToString(a.Content),
+			Filename:    a.Filename,
+			Type:        a.ContentType,
+			Disposition: "attachment",
+		})
+	}
+
 	body, err := json.Marshal(sendEmailPayload{
-		From:    req.From,
-		To:      req.To,
-		Subject: req.Subject,
-		Text:    req.Text,
-		HTML:    req.HTML,
+		From:        req.From,
+		To:          req.To,
+		Subject:     req.Subject,
+		Text:        req.Text,
+		HTML:        req.HTML,
+		Attachments: attachments,
 	})
 	if err != nil {
 		return nil, wrapNetworkError(fmt.Errorf("cfclient: marshal request: %w", err))

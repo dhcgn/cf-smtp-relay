@@ -8,12 +8,13 @@ import (
 
 func TestParseMessage(t *testing.T) {
 	cases := []struct {
-		name        string
-		raw         string
-		wantSubject string
-		wantText    string
-		wantHTML    string
-		wantErr     error
+		name            string
+		raw             string
+		wantSubject     string
+		wantText        string
+		wantHTML        string
+		wantAttachments []Attachment
+		wantErr         error
 	}{
 		{
 			name: "plain_only",
@@ -132,6 +133,80 @@ func TestParseMessage(t *testing.T) {
 			wantSubject: "mixed",
 			wantText:    "the text",
 			wantHTML:    "<p>the html</p>",
+			wantAttachments: []Attachment{
+				{ContentType: "application/pdf", Content: []byte("hello")},
+			},
+		},
+		{
+			name: "attachment_with_content_disposition",
+			raw: "From: a@example.com\r\n" +
+				"To: b@example.com\r\n" +
+				"Subject: invoice\r\n" +
+				"Content-Type: multipart/mixed; boundary=BOUND\r\n" +
+				"\r\n" +
+				"--BOUND\r\n" +
+				"Content-Type: text/plain\r\n" +
+				"\r\n" +
+				"please find attached\r\n" +
+				"--BOUND\r\n" +
+				"Content-Type: application/pdf\r\n" +
+				"Content-Transfer-Encoding: base64\r\n" +
+				"Content-Disposition: attachment; filename=\"invoice.pdf\"\r\n" +
+				"\r\n" +
+				"aGVsbG8=\r\n" +
+				"--BOUND--\r\n",
+			wantSubject: "invoice",
+			wantText:    "please find attached",
+			wantAttachments: []Attachment{
+				{Filename: "invoice.pdf", ContentType: "application/pdf", Content: []byte("hello")},
+			},
+		},
+		{
+			name: "legacy_attachment_via_content_type_name_param",
+			raw: "From: a@example.com\r\n" +
+				"To: b@example.com\r\n" +
+				"Subject: legacy\r\n" +
+				"Content-Type: multipart/mixed; boundary=BOUND\r\n" +
+				"\r\n" +
+				"--BOUND\r\n" +
+				"Content-Type: text/plain\r\n" +
+				"\r\n" +
+				"see attached\r\n" +
+				"--BOUND\r\n" +
+				"Content-Type: application/octet-stream; name=\"data.bin\"\r\n" +
+				"Content-Transfer-Encoding: base64\r\n" +
+				"\r\n" +
+				"aGVsbG8=\r\n" +
+				"--BOUND--\r\n",
+			wantSubject: "legacy",
+			wantText:    "see attached",
+			wantAttachments: []Attachment{
+				{Filename: "data.bin", ContentType: "application/octet-stream", Content: []byte("hello")},
+			},
+		},
+		{
+			name: "rfc2047_encoded_attachment_filename_and_disposition_overrides_text_plain",
+			raw: "From: a@example.com\r\n" +
+				"To: b@example.com\r\n" +
+				"Subject: encoded filename\r\n" +
+				"Content-Type: multipart/mixed; boundary=BOUND\r\n" +
+				"\r\n" +
+				"--BOUND\r\n" +
+				"Content-Type: text/plain\r\n" +
+				"\r\n" +
+				"body text\r\n" +
+				"--BOUND\r\n" +
+				"Content-Type: text/plain\r\n" +
+				"Content-Transfer-Encoding: base64\r\n" +
+				"Content-Disposition: attachment; filename=\"=?UTF-8?Q?report.txt?=\"\r\n" +
+				"\r\n" +
+				"aGVsbG8=\r\n" +
+				"--BOUND--\r\n",
+			wantSubject: "encoded filename",
+			wantText:    "body text",
+			wantAttachments: []Attachment{
+				{Filename: "report.txt", ContentType: "text/plain", Content: []byte("hello")},
+			},
 		},
 		{
 			name: "attachment_only_rejected",
@@ -168,6 +243,21 @@ func TestParseMessage(t *testing.T) {
 			}
 			if got.HTML != tc.wantHTML {
 				t.Errorf("HTML = %q, want %q", got.HTML, tc.wantHTML)
+			}
+			if len(got.Attachments) != len(tc.wantAttachments) {
+				t.Fatalf("Attachments = %+v, want %+v", got.Attachments, tc.wantAttachments)
+			}
+			for i, want := range tc.wantAttachments {
+				gotAttachment := got.Attachments[i]
+				if want.Filename != "" && gotAttachment.Filename != want.Filename {
+					t.Errorf("Attachments[%d].Filename = %q, want %q", i, gotAttachment.Filename, want.Filename)
+				}
+				if gotAttachment.ContentType != want.ContentType {
+					t.Errorf("Attachments[%d].ContentType = %q, want %q", i, gotAttachment.ContentType, want.ContentType)
+				}
+				if string(gotAttachment.Content) != string(want.Content) {
+					t.Errorf("Attachments[%d].Content = %q, want %q", i, gotAttachment.Content, want.Content)
+				}
 			}
 		})
 	}

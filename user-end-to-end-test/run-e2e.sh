@@ -30,7 +30,7 @@ Usage: ./run-e2e.sh [--no-build] [--keep-container] [--skip-himalaya-check]
 Options:
   --no-build             Skip docker image build
   --keep-container       Keep test container running after test
-  --skip-himalaya-check  Skip IMAP mailbox verification with Himalaya
+  --skip-himalaya-check  Skip IMAP mailbox + attachment verification with Himalaya
 USAGE
       exit 0
       ;;
@@ -110,6 +110,8 @@ E2E_HIMALAYA_POLL_INTERVAL_SECONDS="${E2E_HIMALAYA_POLL_INTERVAL_SECONDS:-5}"
 E2E_HIMALAYA_CONFIG_PATH="${E2E_HIMALAYA_CONFIG_PATH:-}"
 
 require_cmd docker
+require_cmd base64
+require_cmd sed
 
 if ! docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
   echo "Docker daemon is not reachable. Start Docker and retry." >&2
@@ -131,6 +133,9 @@ docker run -d --name "${E2E_CONTAINER_NAME}" --env-file "${ENV_FILE}" -p "${SMTP
 cleanup() {
   if [[ -n "${TMP_HIMALAYA_CONFIG_FILE:-}" && -f "${TMP_HIMALAYA_CONFIG_FILE}" ]]; then
     rm -f "${TMP_HIMALAYA_CONFIG_FILE}" || true
+  fi
+  if [[ -n "${TMP_ATTACHMENT_DOWNLOAD_DIR:-}" && -d "${TMP_ATTACHMENT_DOWNLOAD_DIR}" ]]; then
+    rm -rf "${TMP_ATTACHMENT_DOWNLOAD_DIR}" || true
   fi
 
   if [[ "${KEEP_CONTAINER}" -eq 0 ]]; then
@@ -159,9 +164,13 @@ fi
 
 subject="cf-smtp-relay e2e $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 body="End-to-end test via relay container '${E2E_CONTAINER_NAME}' and Himalaya verification."
+attachment_filename="cf-smtp-relay-e2e-attachment.txt"
+attachment_content="cf-smtp-relay e2e attachment payload $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+boundary="cfsmtprelaye2eboundary"
 
-# Send through local relay using curl's SMTP support.
-echo "Sending test email to '${EMAIL}' via relay ${SMTP_HOST}:${SMTP_PORT} ..."
+# Send through local relay using curl's SMTP support. The message is
+# multipart/mixed so the attachment feature is exercised, not just plain text.
+echo "Sending test email (with attachment) to '${EMAIL}' via relay ${SMTP_HOST}:${SMTP_PORT} ..."
 curl --silent --show-error --fail \
   --url "smtp://${SMTP_HOST}:${SMTP_PORT}" \
   --mail-from "${FROM_EMAIL}" \
@@ -172,7 +181,20 @@ curl --silent --show-error --fail \
     printf 'Subject: %s\r\n' "${subject}"
     printf 'Date: %s\r\n' "$(date -R)"
     printf 'Message-ID: <%s@local.test>\r\n' "$(date +%s)-$RANDOM"
-    printf '\r\n%s\r\n' "${body}"
+    printf 'MIME-Version: 1.0\r\n'
+    printf 'Content-Type: multipart/mixed; boundary=%s\r\n' "${boundary}"
+    printf '\r\n'
+    printf -- '--%s\r\n' "${boundary}"
+    printf 'Content-Type: text/plain; charset=utf-8\r\n'
+    printf '\r\n'
+    printf '%s\r\n' "${body}"
+    printf -- '--%s\r\n' "${boundary}"
+    printf 'Content-Type: text/plain\r\n'
+    printf 'Content-Transfer-Encoding: base64\r\n'
+    printf 'Content-Disposition: attachment; filename="%s"\r\n' "${attachment_filename}"
+    printf '\r\n'
+    printf '%s' "${attachment_content}" | base64 | sed 's/$/\r/'
+    printf -- '--%s--\r\n' "${boundary}"
   ) >/dev/null
 
 echo "Relay accepted SMTP message."
@@ -208,6 +230,7 @@ EOF
   echo "Polling mailbox with Himalaya for subject: ${subject}"
   deadline=$(( $(date +%s) + E2E_HIMALAYA_POLL_SECONDS ))
   found=0
+  matched_out=""
 
   while [[ $(date +%s) -lt ${deadline} ]]; do
     set +e
@@ -218,6 +241,7 @@ EOF
     if [[ ${rc} -eq 0 ]] && [[ -n "${out}" ]]; then
       if echo "${out}" | jq -e --arg s "${subject}" '.. | objects | .subject? // empty | select(. == $s)' >/dev/null 2>&1; then
         found=1
+        matched_out="${out}"
         break
       fi
     fi
@@ -233,6 +257,36 @@ EOF
   fi
 
   echo "Himalaya verification succeeded: message found in mailbox."
+
+  # Verify the attachment itself survived the full round trip (relay ->
+  # Cloudflare -> IMAP), not just the message's presence/subject.
+  message_id="$(echo "${matched_out}" | jq -r --arg s "${subject}" '.. | objects | select(.subject? == $s) | .id' | head -n1)"
+  if [[ -z "${message_id}" || "${message_id}" == "null" ]]; then
+    echo "Could not determine the message id from Himalaya's envelope list; cannot verify the attachment." >&2
+    exit 1
+  fi
+
+  TMP_ATTACHMENT_DOWNLOAD_DIR="$(mktemp -d)"
+  echo "Downloading attachment from message id '${message_id}' with Himalaya ..."
+  if ! himalaya -c "${HIMALAYA_CONFIG_FILE}" attachment download "${message_id}" -d "${TMP_ATTACHMENT_DOWNLOAD_DIR}" >/dev/null 2>&1; then
+    echo "Himalaya failed to download the attachment for message id '${message_id}'." >&2
+    echo "Recent relay logs:" >&2
+    docker logs --tail 80 "${E2E_CONTAINER_NAME}" >&2 || true
+    exit 1
+  fi
+
+  downloaded_file="${TMP_ATTACHMENT_DOWNLOAD_DIR}/${attachment_filename}"
+  if [[ ! -f "${downloaded_file}" ]]; then
+    echo "Downloaded attachment not found at ${downloaded_file}." >&2
+    exit 1
+  fi
+
+  if [[ "$(cat "${downloaded_file}")" != "${attachment_content}" ]]; then
+    echo "Downloaded attachment content does not match what was sent." >&2
+    exit 1
+  fi
+
+  echo "Attachment verification succeeded: '${attachment_filename}' arrived byte-for-byte intact."
 fi
 
 echo "Recent relay logs:"

@@ -226,3 +226,63 @@ func TestSMTPSession_DisallowedSenderDomainRejectedAtMailFrom(t *testing.T) {
 		t.Error("SendEmail should not have been called")
 	}
 }
+
+const testMessageWithAttachment = "Subject: has attachment\r\n" +
+	"Content-Type: multipart/mixed; boundary=BOUND\r\n" +
+	"\r\n" +
+	"--BOUND\r\n" +
+	"Content-Type: text/plain\r\n" +
+	"\r\n" +
+	"hello world\r\n" +
+	"--BOUND\r\n" +
+	"Content-Type: text/plain\r\n" +
+	"Content-Transfer-Encoding: base64\r\n" +
+	"Content-Disposition: attachment; filename=\"notes.txt\"\r\n" +
+	"\r\n" +
+	"aGVsbG8=\r\n" +
+	"--BOUND--\r\n"
+
+func TestSMTPSession_AttachmentForwarded(t *testing.T) {
+	sender := &fakeSender{}
+	addr, stop := startTestServer(t, Config{}, sender)
+	defer stop()
+
+	c, err := smtp.Dial(addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	if err := c.Mail("from@example.com"); err != nil {
+		t.Fatalf("MAIL FROM: %v", err)
+	}
+	if err := c.Rcpt("to@example.com"); err != nil {
+		t.Fatalf("RCPT TO: %v", err)
+	}
+	wc, err := c.Data()
+	if err != nil {
+		t.Fatalf("DATA: %v", err)
+	}
+	if _, err := wc.Write([]byte(testMessageWithAttachment)); err != nil {
+		t.Fatalf("write message: %v", err)
+	}
+	if err := wc.Close(); err != nil {
+		t.Fatalf("DATA close (expected 250): %v", err)
+	}
+
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if len(sender.lastReq.Attachments) != 1 {
+		t.Fatalf("Attachments = %+v, want 1 entry", sender.lastReq.Attachments)
+	}
+	got := sender.lastReq.Attachments[0]
+	if got.Filename != "notes.txt" {
+		t.Errorf("Filename = %q, want %q", got.Filename, "notes.txt")
+	}
+	if got.ContentType != "text/plain" {
+		t.Errorf("ContentType = %q, want %q", got.ContentType, "text/plain")
+	}
+	if string(got.Content) != "hello" {
+		t.Errorf("Content = %q, want %q", got.Content, "hello")
+	}
+}
