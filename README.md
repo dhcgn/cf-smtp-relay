@@ -6,39 +6,17 @@ A tiny, self-hosted **SMTP-to-Cloudflare-Email-API bridge**, written in Go and s
 
 Most self-hosted software only knows how to *send* mail via SMTP, but running or paying for a full SMTP relay (Sendgrid, Postmark, a real Postfix box, …) is overkill if your domain already sits on Cloudflare DNS. Cloudflare Email Service lets you send transactional email with a single authenticated HTTPS request — no SMTP credentials, no port 25/587 exposure, no separate provider account. This project is the missing adapter: a tiny local SMTP endpoint your existing apps can already talk to, translating each accepted message into one Cloudflare REST call.
 
-## How it works
+## Architecture
 
-```
-┌─────────────┐   SMTP (25/587/2525)   ┌───────────────┐   HTTPS REST   ┌────────────────────────┐
-│ Self-hosted │ ─────────────────────▶ │  cf-smtp-relay │ ─────────────▶ │ Cloudflare Email Service│
-│ app (Immich,│                        │  (this repo)   │                │  /email/sending/send    │
-│ Vaultwarden)│ ◀───────────────────── │                │ ◀───────────── │                          │
-└─────────────┘   SMTP response codes  └───────────────┘  success/error  └────────────────────────┘
-```
-
-1. The relay speaks just enough SMTP to accept `EHLO`/`MAIL FROM`/`RCPT TO`/`DATA`/`QUIT` from a local client.
-2. The `DATA` payload (a raw RFC 5322 message) is parsed with Go's standard `net/mail` / `mime` / `mime/multipart` packages to extract `From`, `To`, `Subject`, plain-text and HTML bodies, and attachments.
-3. The parsed message is converted into a single `POST https://api.cloudflare.com/client/v4/accounts/{account_id}/email/sending/send` call.
-4. Cloudflare's response (`delivered` / `queued` / `permanent_bounces` / `errors`) is mapped back to an SMTP status code and returned to the sending app.
-
-## Core dependencies
-
-Kept deliberately short — stdlib first, third-party only where it earns its place:
-
-| Package | Purpose |
-|---|---|
-| [`github.com/emersion/go-smtp`](https://github.com/emersion/go-smtp) | SMTP server protocol state machine (stdlib only has an SMTP *client*) |
-| [`github.com/spf13/viper`](https://github.com/spf13/viper) | Configuration binding — env vars only for now, but leaves the door open for a config file later without a rewrite |
-| [`github.com/urfave/cli/v3`](https://github.com/urfave/cli/v3) | CLI scaffolding: `serve` / `version` subcommands, flags, and built-in `--version` handling |
-
-Everything else — message parsing, the Cloudflare HTTP call, logging — stays in the standard library (`net/mail`, `mime`, `mime/multipart`, `net/http`, `log/slog`).
+For the request/response flow diagram, dependency rationale, the Cloudflare-error-to-SMTP mapping table, design decisions, and project layout, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Features
 
-**Implemented (MVP / Milestone 1)**
+**Implemented**
 - Minimal SMTP server: `EHLO`, `MAIL FROM`, `RCPT TO`, `DATA`, `QUIT`
-- **No authentication** — the relay trusts whatever can reach it on the Docker network by design (see [Design decisions](#design-decisions))
-- Single recipient, plain-text + HTML body, `Subject`
+- **No authentication** — the relay trusts whatever can reach it on the Docker network by design (see [Design decisions](ARCHITECTURE.md#design-decisions))
+- Single recipient, plain-text + HTML body, `Subject`, and file attachments
+- File attachments: any non-text MIME part (or any part carrying a filename) is parsed out and forwarded in Cloudflare's `attachments` array, base64-encoded. Regular attachments only — no inline/`cid:`-referenced image support. Size is bounded by the existing `SMTP_MAX_MESSAGE_SIZE_BYTES` (matches Cloudflare's 5 MiB total-message-size limit); see [Design decisions](ARCHITECTURE.md#design-decisions).
 - Forwarding via the Cloudflare Email Sending REST API
 - On transient Cloudflare errors (`429`/`5xx`), the relay returns an SMTP temporary-failure code immediately and lets the sending app's own retry logic handle it — **no internal retry queue in the MVP**
 - Env-var-only configuration (12-factor style), no config file, bound via `viper`
@@ -49,7 +27,7 @@ Everything else — message parsing, the Cloudflare HTTP call, logging — stays
 - Multi-stage Dockerfile → distroless, non-root, published to `ghcr.io`
 
 **Planned next (later milestones — see [Roadmap](#roadmap--milestones))**
-- Multiple recipients, `Cc`/`Bcc`, custom headers, attachments (≤ 5 MiB total, matching Cloudflare's limit)
+- Multiple recipients, `Cc`/`Bcc`, custom headers
 - Local retry queue with backoff for transient Cloudflare errors, if real-world usage shows the "let the client retry" approach isn't enough
 - `/healthz` endpoint + Prometheus metrics
 - Cross-platform release binaries (linux/darwin/windows, amd64/arm64) via GoReleaser
@@ -223,45 +201,13 @@ For full options and required environment variables, see `user-end-to-end-test/R
 | `LOG_FORMAT` | – | `json` | `json` \| `text`. |
 | `SHUTDOWN_TIMEOUT_SECONDS` | – | `10` | Grace period for in-flight connections on `SIGTERM`. |
 
-There are deliberately no auth/TLS variables: the MVP has no built-in SMTP authentication and no config file, only environment variables (see [Design decisions](#design-decisions)).
-
-## Error mapping: Cloudflare → SMTP
-
-Cloudflare's REST API returns numeric error codes; the relay maps these to SMTP reply codes so sending applications retry (or give up) the way they normally would against a real MTA:
-
-| Cloudflare code | Meaning | SMTP mapping (implemented) |
-|---|---|---|
-| `10004` (429, throttled) | Rate limit exceeded | `450 4.7.1` — temporary, client should retry |
-| `10100` (503, upstream auth) | Auth service unavailable | `451 4.4.2` — temporary |
-| `10002` / `10003` (500) | Internal / not implemented | `451 4.4.2` — temporary |
-| `10101` / `10102` / `10103` (401/403) | Bad or unauthorized token | `550 5.7.1` — permanent, logged loudly for the operator (not a client-fixable problem) |
-| `10203` (403, sending disabled) | Domain/account not enabled for sending | `550 5.7.1` — permanent |
-| `10200` (400, too big) | Message exceeds size limit | `552 5.3.4` — permanent |
-| `10001` / `10201` / `10202` (400) | Malformed request/content | `550 5.6.0` — permanent |
-
-Any other/unrecognized Cloudflare error code (including undocumented codes) falls back to a classification by HTTP status: `429` → `450 4.7.1` (temporary), `>= 500` → `451 4.4.2` (temporary), `401`/`403` → `550 5.7.1` (permanent, logged loudly), `400`/`404` → `550 5.6.0` (permanent), anything else (including network-level failures with no Cloudflare status at all) → `451 4.4.2` (temporary).
-
-In the MVP, every one of these mapped codes is returned straight to the connecting app — there's no internal retry queue yet, so a `450`/`451` simply means "your app should try again," the same as it would against any other flaky MTA.
-
-## Design decisions
-
-- **Why not 100% Go standard library?** Go's standard library ships an SMTP *client* (`net/smtp`) but no SMTP *server*. Per the project's own preference for native packages first, the relay uses stdlib wherever it can — `net/mail`, `mime`, `mime/multipart` for message parsing, `net/http` for the Cloudflare call, `log/slog` for logging — but relies on [`github.com/emersion/go-smtp`](https://github.com/emersion/go-smtp) for the actual SMTP protocol state machine, since writing and hardening a spec-compliant SMTP server from scratch isn't a good use of MVP time.
-- **Go 1.26**: built with Go 1.26, taking advantage of the default Green Tea garbage collector (lower GC overhead under many short-lived goroutines/connections) and the experimental goroutine-leak profiler (`GOEXPERIMENT=goroutineleakprofile` / `runtime/pprof` `goroutineleak`) in CI tests, given the connection-per-goroutine nature of an SMTP server.
-- **Docker best practices applied**: multi-stage build (build stage with full Go toolchain → minimal `distroless` runtime stage), non-root user, no shell in the final image, `SIGTERM`-aware graceful shutdown, structured logs to stdout/stderr (12-factor), semantic version + `sha-<short>` image tags, multi-arch manifest (`linux/amd64`, `linux/arm64`) published via GitHub Actions to `ghcr.io`.
-- **No built-in authentication**: the relay assumes it only ever sits on an internal, trusted Docker network (no published port), the same trust model already used by plenty of internal mail relays. This keeps the MVP small and avoids building credential storage/rotation before it's needed. If a future use case needs the relay reachable from somewhere less trusted, `AUTH`/STARTTLS becomes a real milestone rather than a day-one requirement.
-- **No internal retry queue in the MVP**: transient Cloudflare errors are surfaced immediately as SMTP `4xx` codes, and the sending application's own delivery/retry logic is responsible for trying again — the same behavior it would already have against a temporarily unreachable real MTA. Whether to add a persistent local retry queue later is left open for M3, once it's clear from real usage whether client-side retries are good enough.
-- **Env vars only, no config file**: keeps the MVP's surface area small and matches typical Docker/12-factor deployment; a config file can be reconsidered later if the env var list grows unwieldy.
-- **`viper` for configuration binding**: even though the MVP only reads env vars, `viper` gives structured, validated binding (with defaults and type coercion) for free, and means adding a config file later (if ever needed) is a small change rather than a rewrite.
-- **`urfave/cli/v3` for the CLI shell**: gives the binary a proper `serve` command plus a `version` command/flag with essentially no boilerplate, instead of hand-rolling flag parsing.
-- **Version reporting**: `version`, `commit`, and `buildTime` are package-level `var`s in `main`, left as zero values (`"dev"`/`"none"`/`"unknown"`) for local builds and set via `-ldflags -X` in CI, then logged once at startup and exposed through the CLI's version output — the same pattern used by most Go CLI tools.
-- **Attachments in the MVP**: attachments aren't supported until M2. If an incoming message has an attachment alongside a text/HTML body, the relay silently strips the attachment and forwards just the text/HTML (still `250 OK`), logging the drop at `warn` so it's visible to an operator under the default log level without blocking mail flow. A message with *no* text/HTML content at all (e.g. attachment-only) is rejected.
-- **Single recipient enforcement**: `go-smtp`'s own `MaxRecipients: 1` setting rejects a second `RCPT TO` with `452 4.5.3` before the relay's own recipient-handling code is even invoked again — no need to hand-roll that check.
+There are deliberately no auth/TLS variables: the MVP has no built-in SMTP authentication and no config file, only environment variables (see [Design decisions](ARCHITECTURE.md#design-decisions)).
 
 ## Roadmap / Milestones
 
 - [x] **M0 — Scaffolding**: repo layout (`cmd/`, `internal/`), `LICENSE`, `.github/workflows/build-test.yml` + `.github/workflows/release.yml`, `.github/copilot-instructions.md`, Dockerfile skeleton, this README.
 - [x] **M1 — MVP** 🎯: minimal, unauthenticated SMTP listener (trusted network only), single-recipient plain/HTML forwarding to Cloudflare, immediate `4xx`/`5xx` on transient/permanent Cloudflare errors (no retry queue), env-var-only config, structured logging, graceful shutdown, multi-stage Docker image published to `ghcr.io` on tag push.
-- [ ] **M2 — Message fidelity**: multiple recipients, `Cc`/`Bcc`, custom headers, attachments, size-limit enforcement with a clean SMTP rejection instead of a failed API call.
+- [ ] **M2 — Message fidelity**: multiple recipients, `Cc`/`Bcc`, custom headers, size-limit enforcement with a clean SMTP rejection instead of a failed API call. Attachments done ✅ (regular file attachments only; inline/`cid:` images still out of scope).
 - [ ] **M3 — Hardening**: `/healthz`, Prometheus metrics, and a decision (backed by real usage) on whether a local retry queue with backoff is worth adding for `429`/`5xx` Cloudflare responses.
 - [ ] **M4 — Distribution**: GoReleaser cross-platform binaries (linux/darwin/windows × amd64/arm64), SBOM + build provenance attestation for the Docker image, `docker-compose.yml` and example Kubernetes manifest in `/examples`.
 - [ ] **M5 — Stretch**: multiple Cloudflare accounts/domains with per-sender routing, delivery-status reconciliation (via Cloudflare's queued/delivered/bounce data), simple CLI for sending a test message without a full SMTP client, and — only if ever needed — STARTTLS/SMTP `AUTH` for running outside a trusted network.
@@ -278,15 +224,6 @@ Two workflows, kept deliberately separate:
 ## AI coding agents
 
 This repo ships a [`.github/copilot-instructions.md`](.github/copilot-instructions.md) file for GitHub Copilot and similar AI coding agents. It restates the non-negotiable MVP constraints above (no auth, no retry queue, no config file, stdlib-first) so an agent doesn't quietly "improve" scope that was deliberately deferred — read it before letting an agent touch this repo.
-
-## Project layout
-
-```
-cmd/cf-smtp-relay/     # main package: CLI wiring (urfave/cli/v3), version vars
-internal/config/       # viper-backed configuration loading
-internal/smtpserver/   # go-smtp server setup, SMTP <-> internal message mapping
-internal/cfclient/     # Cloudflare Email Sending REST API client
-```
 
 ## Development
 
@@ -317,16 +254,3 @@ GOOS=linux GOARCH=arm64 go build -o bin/cf-smtp-relay-linux-arm64 ./cmd/cf-smtp-
 ## License
 
 MIT.
-
-## Key decisions log
-
-| Decision | Choice | Rationale |
-|---|---|---|
-| SMTP auth | None — trust the Docker network | Keeps MVP small; matches how many internal relays already operate |
-| Cloudflare API downtime/rate-limit | Fail fast, no local retry queue (for now) | Simplest MVP behavior; sending apps already have their own retry logic |
-| Configuration | Env vars only | 12-factor style, no config file to parse/validate |
-| Config binding library | `viper` | Structured/validated env var binding, config file support possible later without a rewrite |
-| CLI framework | `urfave/cli/v3` | Free `serve`/`version` subcommands and flag handling |
-| SMTP server library | `go-smtp` | Stdlib has no SMTP server; hand-rolling DATA dot-stuffing/line-length/reply-code framing risks silently corrupting mail, which is worse than one extra dependency |
-| Attachments before M2 | Silently strip, forward text/HTML, log at `warn` | Keeps mail flowing for the common case without a hard MVP dependency on attachment support, while staying visible to operators at the default log level |
-| CI structure | Separate build-test (path-ignores `.md`) and tag-triggered release workflows | Docs edits don't trigger builds; releases stay tied to version tags |

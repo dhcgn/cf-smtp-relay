@@ -4,7 +4,7 @@ These instructions apply to any AI coding agent (GitHub Copilot, Claude Code, or
 
 ## What this project is
 
-A small Go daemon that accepts locally-sent SMTP messages and forwards each one as a single HTTPS call to the Cloudflare Email Service REST API (`POST /accounts/{account_id}/email/sending/send`). See `README.md` for the full architecture, configuration, and roadmap — **read it before making changes**, especially the "Key decisions log" and "Roadmap / Milestones" sections.
+A small Go daemon that accepts locally-sent SMTP messages and forwards each one as a single HTTPS call to the Cloudflare Email Service REST API (`POST /accounts/{account_id}/email/sending/send`). See `README.md` for configuration and the roadmap, and `ARCHITECTURE.md` for the full architecture and design-decision rationale — **read both before making changes**, especially `ARCHITECTURE.md`'s "Key decisions log" section and `README.md`'s "Roadmap / Milestones" section.
 
 ## Non-negotiable constraints (do not "fix" these without being asked)
 

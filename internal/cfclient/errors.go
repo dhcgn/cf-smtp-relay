@@ -27,7 +27,7 @@ func (e *SendError) Error() string {
 
 // explicitCodes maps Cloudflare's documented error codes to an SMTP
 // classification. Keep this in sync with the "Error mapping" table in
-// README.md.
+// ARCHITECTURE.md.
 var explicitCodes = map[int]SendError{
 	10004: {Temporary: true, SMTPCode: 450, EnhancedCode: [3]int{4, 7, 1}, PublicMessage: "rate limit exceeded, please retry"},
 
